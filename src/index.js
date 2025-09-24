@@ -339,7 +339,7 @@ if (! formula && typeof(require) === 'function') {
         obj.headers = [];
         obj.records = [];
         obj.history = [];
-        obj.formula = [];
+        obj.formula = new Map();
         obj.colgroup = [];
         obj.selection = [];
         obj.highlighted  = [];
@@ -5081,23 +5081,23 @@ if (! formula && typeof(require) === 'function') {
 
         obj.updateFormulaChain = function(x, y, records) {
             var cellId = jexcel.getColumnNameFromId([x, y]);
-            if (obj.formula[cellId] && obj.formula[cellId].length > 0) {
+            if (obj.formula.has(cellId) && obj.formula.get(cellId).size > 0) {
                 if (chainLoopProtection[cellId]) {
                     obj.records[y][x].innerHTML = '#ERROR';
-                    obj.formula[cellId] = '';
+                    obj.formula.set(cellId, null);
                 } else {
                     // Protection
                     chainLoopProtection[cellId] = true;
 
-                    for (var i = 0; i < obj.formula[cellId].length; i++) {
-                        var cell = jexcel.getIdFromColumnName(obj.formula[cellId][i], true);
+                    for (const i of obj.formula.get(cellId)) {
+                        var cell = jexcel.getIdFromColumnName(i, true);
                         // Update cell
                         var value = ''+obj.options.data[cell[1]][cell[0]];
                         if (value.substr(0,1) == '=') {
                             records.push(obj.updateCell(cell[0], cell[1], value, true));
                         } else {
                             // No longer a formula, remove from the chain
-                            Object.keys(obj.formula)[i] = null;
+                            obj.formula.delete(i);
                         }
                         obj.updateFormulaChain(cell[0], cell[1], records);
                     }
@@ -5127,24 +5127,22 @@ if (! formula && typeof(require) === 'function') {
             }
 
             // Update formula chain
-            var formula = [];
-            var keys = Object.keys(obj.formula);
-            for (var j = 0; j < keys.length; j++) {
+            var formula = new Map();
+            var keys = obj.formula.keys();
+            for (let key of keys) {
                 // Current key and values
-                var key = keys[j];
-                var value = obj.formula[key];
+                var value = obj.formula.get(key);
                 // Update key
                 if (referencesToUpdate[key]) {
                     key = referencesToUpdate[key];
                 }
                 // Update values
-                formula[key] = [];
-                for (var i = 0; i < value.length; i++) {
-                    var letter = value[i];
+                formula.set(key, new Set());
+                for (let letter of value) {
                     if (referencesToUpdate[letter]) {
                         letter = referencesToUpdate[letter];
                     }
-                    formula[key].push(letter);
+                    formula.get(key).add(letter);
                 }
             }
             obj.formula = formula;
@@ -5282,62 +5280,52 @@ if (! formula && typeof(require) === 'function') {
                 }
 
                 // Get tokens
-                var tokens = expression.match(/([A-Z]+[0-9]+)/g);
+                var tokens = new Set(expression.match(/([A-Z]+[0-9]+)/g));
 
                 // Direct self-reference protection
-                if (tokens && tokens.indexOf(parentId) > -1) {
+                if (tokens && tokens.has(parentId)) {
                     console.error('Self Reference detected');
                     return '#ERROR';
                 } else {
                     // Expressions to be used in the parsing
-                    var formulaExpressions = {};
+                    var formulaExpressions = new Map();
 
-                    if (tokens) {
-                        for (var i = 0; i < tokens.length; i++) {
-                            // Keep chain
-                            if (! obj.formula[tokens[i]]) {
-                                obj.formula[tokens[i]] = [];
-                            }
-                            // Is already in the register
-                            if (obj.formula[tokens[i]].indexOf(parentId) < 0) {
-                                obj.formula[tokens[i]].push(parentId);
-                            }
+                    for (const token of tokens) {
+                        // 依存関係を記録
+                        if (obj.formula.get(token)?.add(parentId) === undefined) {
+                            obj.formula.set(token, new Set([parentId]));
+                        }
 
-                            // Do not calculate again
-                            if (eval('typeof(' + tokens[i] + ') == "undefined"')) {
-                                // Coords
-                                var position = jexcel.getIdFromColumnName(tokens[i], 1);
-                                // Get value
-                                if (typeof(obj.options.data[position[1]]) != 'undefined' && typeof(obj.options.data[position[1]][position[0]]) != 'undefined') {
-                                    var value = obj.options.data[position[1]][position[0]];
+                        // Do not calculate again
+                        if (!(token in globalThis)) {
+                            // Coords
+                            var position = jexcel.getIdFromColumnName(token, 1);
+                            // Get value
+                            var value = obj.options.data?.[position[1]]?.[position[0]] ?? '';
+
+                            // 値が数式の場合、再帰的に計算
+                            if ((''+value)?.[0] == '=') {
+                                if (token in formulaResults) {
+                                    value = formulaResults[token];
                                 } else {
-                                    var value = '';
+                                    value = execute(value, position[0], position[1]);
+                                    formulaResults[token] = value;
                                 }
-                                // Get column data
-                                if ((''+value).substr(0,1) == '=') {
-                                    if (typeof formulaResults[tokens[i]] !== 'undefined') {
-                                        value = formulaResults[tokens[i]];
-                                    } else {
-                                        value = execute(value, position[0], position[1]);
-                                        formulaResults[tokens[i]] = value;
-                                    }
-                                }
-                                // Type!
-                                if ((''+value).trim() == '') {
-                                    // Null
-                                    formulaExpressions[tokens[i]] = null;
+                            }
+                            // データ型の処理
+                            if ((''+value).trim() == '') {
+                                formulaExpressions.set(token, null);
+                            } else {
+                                if (value == Number(value) && obj.options.autoCasting == true) {
+                                    // Number
+                                    formulaExpressions.set(token, Number(value));
                                 } else {
-                                    if (value == Number(value) && obj.options.autoCasting == true) {
-                                        // Number
-                                        formulaExpressions[tokens[i]] = Number(value);
+                                    // Trying any formatted number
+                                    var number = obj.parseNumber(value, position[0])
+                                    if (obj.options.autoCasting == true && number) {
+                                        formulaExpressions.set(token, number);
                                     } else {
-                                        // Trying any formatted number
-                                        var number = obj.parseNumber(value, position[0])
-                                        if (obj.options.autoCasting == true && number) {
-                                            formulaExpressions[tokens[i]] = number;
-                                        } else {
-                                            formulaExpressions[tokens[i]] = '"' + value + '"';
-                                        }
+                                        formulaExpressions.set(token, value);
                                     }
                                 }
                             }
@@ -5364,7 +5352,10 @@ if (! formula && typeof(require) === 'function') {
          */
         obj.parseNumber = function(value, columnNumber) {
             // Decimal point
-            var decimal = columnNumber && obj.options.columns[columnNumber].decimal ? obj.options.columns[columnNumber].decimal : '.';
+            var decimal;
+            if (columnNumber) {
+                decimal = obj.options.columns[columnNumber].decimal ?? '.';
+            }
 
             // Parse both parts of the number
             var number = ('' + value);
@@ -8597,13 +8588,14 @@ if (! formula && typeof(require) === 'function') {
      */
     jexcel.getIdFromColumnName = function (id, arr) {
         // Get the letters
-        var t = /^[a-zA-Z]+/.exec(id);
+        let [_, t, number] = id.match(/^([a-zA-Z]+)([0-9]+)?$/) ?? [];
+        number = parseInt(number);
 
         if (t) {
             // Base 26 calculation
-            var code = 0;
-            for (var i = 0; i < t[0].length; i++) {
-                code += parseInt(t[0].charCodeAt(i) - 64) * Math.pow(26, (t[0].length - 1 - i));
+            let code = 0;
+            for (let i = 0, len = t.length; i < len; i++) {
+                code += parseInt(t.charCodeAt(i) - 64) * Math.pow(26, (len - 1 - i));
             }
             code--;
             // Make sure jexcel starts on zero
@@ -8612,7 +8604,6 @@ if (! formula && typeof(require) === 'function') {
             }
 
             // Number
-            var number = parseInt(/[0-9]+$/.exec(id));
             if (number > 0) {
                 number--;
             }
