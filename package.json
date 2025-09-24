@@ -47,7 +47,7 @@
         "datasheet"
     ],
     "dependencies": {
-        "@jspreadsheet/formula": "^2.0.2",
+        "@jspreadsheet/formula": "git+https://github.com/rui-ctl/formula-basic.git#main",
         "jsuites": "^5.6.5"
     },
     "devDependencies": {
